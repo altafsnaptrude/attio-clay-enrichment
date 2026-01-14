@@ -1,0 +1,33 @@
+name: Attio-Clay Enrichment
+
+on:
+  schedule:
+    # Run every hour at minute 0
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    # Allow manual trigger from GitHub UI
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run enrichment pipeline
+        env:
+          ATTIO_API_KEY: ${{ secrets.ATTIO_API_KEY }}
+          CLAY_API_KEY: ${{ secrets.CLAY_API_KEY }}
+          CLAY_TABLE_ID: ${{ secrets.CLAY_TABLE_ID }}
+        run: python src/main.py
