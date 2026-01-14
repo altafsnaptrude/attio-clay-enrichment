@@ -27,6 +27,5 @@ jobs:
       - name: Run enrichment pipeline
         env:
           ATTIO_API_KEY: ${{ secrets.ATTIO_API_KEY }}
-          CLAY_API_KEY: ${{ secrets.CLAY_API_KEY }}
-          CLAY_TABLE_ID: ${{ secrets.CLAY_TABLE_ID }}
+          CLAY_WEBHOOK_URL: ${{ secrets.CLAY_WEBHOOK_URL }}
         run: python src/main.py
