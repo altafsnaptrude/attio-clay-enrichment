@@ -1,194 +1,174 @@
 #!/usr/bin/env python3
 """
-Main enrichment pipeline script.
+Attio-Clay Enrichment Pipeline
 
-This script runs hourly via GitHub Actions and:
-1. Queries Attio for unenriched leads
-2. Sends them to Clay for enrichment
-3. Checks for completed enrichments from previous runs
-4. Updates Attio with enriched data
+This script runs hourly via GitHub Actions to:
+1. Find unenriched leads in Attio
+2. Send them to Clay for enrichment
+3. Update Attio with enriched data from Clay
+
+Environment variables required:
+- ATTIO_API_KEY: Attio API access token
+- CLAY_API_KEY: Clay API key
+- CLAY_TABLE_ID: Clay table ID for enrichment
 """
 
+import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
-# Add src to path for imports
-sys.path.insert(0, "src")
-
-from config import BATCH_SIZE, RATE_LIMIT_SECONDS, ENRICHMENT_TIMEOUT_HOURS, ATTIO_API_KEY, CLAY_API_KEY, CLAY_TABLE_ID
 from attio_client import AttioClient
 from clay_client import ClayClient
 
 
-def check_config():
-    """Verify required environment variables are set."""
-    missing = []
-    if not ATTIO_API_KEY:
-        missing.append("ATTIO_API_KEY")
-    if not CLAY_API_KEY:
-        missing.append("CLAY_API_KEY")
-    if not CLAY_TABLE_ID:
-        missing.append("CLAY_TABLE_ID")
-
-    if missing:
-        print(f"ERROR: Missing required environment variables: {', '.join(missing)}")
-        sys.exit(1)
+# Configuration
+BATCH_SIZE = 50  # Max records to process per run
+RATE_LIMIT_SECONDS = 0.5  # Delay between API calls
+CLAY_PROCESSING_WAIT = 120  # Seconds to wait for Clay to process
 
 
-def process_pending_enrichments(attio: AttioClient, clay: ClayClient) -> tuple[int, int]:
+def log(message: str):
+    """Print timestamped log message."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}")
+
+
+def send_to_clay(attio: AttioClient, clay: ClayClient) -> list:
     """
-    Check for completed enrichments from previous runs.
-
+    Find unenriched records in Attio and send them to Clay.
+    
     Returns:
-        Tuple of (enriched_count, failed_count)
+        List of record IDs that were sent to Clay
     """
-    print("\n--- Checking for completed enrichments ---")
-
-    pending = attio.query_pending_records(limit=100)
-    print(f"Found {len(pending)} records pending enrichment")
-
-    if not pending:
-        return 0, 0
-
-    enriched_count = 0
-    failed_count = 0
-    now = datetime.now(timezone.utc)
-    timeout_threshold = now - timedelta(hours=ENRICHMENT_TIMEOUT_HOURS)
-
-    # Get Attio IDs to look up in Clay
-    attio_ids = [r["record_id"] for r in pending if r["record_id"]]
-
-    # Find matching Clay rows
-    clay_rows = clay.find_rows_by_attio_ids(attio_ids)
-    print(f"Found {len(clay_rows)} matching rows in Clay")
-
-    for record in pending:
-        record_id = record["record_id"]
-        sent_at = record.get("sent_at")
-
-        # Check if we have enrichment results
-        if record_id in clay_rows:
-            clay_row = clay_rows[record_id]
-
-            # Extract enriched data from Clay row
-            enriched_data = {
-                "job_title": clay_row.get("enriched_job_title") or clay_row.get("job_title"),
-                "company": clay_row.get("enriched_company") or clay_row.get("company"),
-                "linkedin_url": clay_row.get("enriched_linkedin") or clay_row.get("linkedin_url"),
-                "phone": clay_row.get("enriched_phone") or clay_row.get("phone"),
-            }
-
-            # Check if we actually got any enrichment
-            if any(enriched_data.values()):
-                if attio.mark_enriched(record_id, enriched_data):
-                    print(f"  ✅ Enriched {record_id}")
-                    enriched_count += 1
-                else:
-                    print(f"  ❌ Failed to update {record_id}")
-                    failed_count += 1
-            else:
-                # Clay processed but no data found
-                if attio.mark_failed(record_id, "No enrichment data returned from Clay"):
-                    print(f"  ⚠️ No data for {record_id}")
-                    failed_count += 1
-
-        # Check for stuck/timed out records
-        elif sent_at and sent_at < timeout_threshold:
-            if attio.mark_failed(record_id, f"Enrichment timed out after {ENRICHMENT_TIMEOUT_HOURS} hours"):
-                print(f"  ⏰ Timed out {record_id}")
-                failed_count += 1
-
-    return enriched_count, failed_count
-
-
-def send_for_enrichment(attio: AttioClient, clay: ClayClient) -> tuple[int, int]:
-    """
-    Find unenriched records and send them to Clay.
-
-    Returns:
-        Tuple of (sent_count, error_count)
-    """
-    print("\n--- Sending new records for enrichment ---")
-
-    records = attio.query_unenriched_records(limit=BATCH_SIZE)
-    print(f"Found {len(records)} records needing enrichment")
-
-    if not records:
-        return 0, 0
-
-    sent_count = 0
-    error_count = 0
-
-    for record in records:
-        record_id = record["record_id"]
-        email = record.get("email")
-
-        if not email:
-            print(f"  ⚠️ Skipping {record_id} - no email")
+    log("Querying Attio for unenriched records...")
+    unenriched = attio.query_unenriched_records(limit=BATCH_SIZE)
+    
+    log(f"Found {len(unenriched)} records needing enrichment")
+    
+    if not unenriched:
+        return []
+    
+    sent_ids = []
+    
+    for i, record in enumerate(unenriched):
+        record_data = attio.extract_record_data(record)
+        record_id = record_data.get("attio_record_id")
+        email = record_data.get("email")
+        
+        if not record_id or not email:
+            log(f"  Skipping record - missing ID or email")
             continue
-
-        print(f"  Processing {record_id} ({email})...")
-
+        
+        log(f"  [{i+1}/{len(unenriched)}] Processing {email}...")
+        
+        # Mark as sent in Attio first
+        if not attio.mark_sent_to_clay(record_id):
+            log(f"    Failed to update Attio status, skipping")
+            continue
+        
         # Send to Clay
-        clay_row_id = clay.send_for_enrichment(record)
-
+        clay_row_id = clay.send_for_enrichment(record_data)
+        
         if clay_row_id:
-            # Update Attio status
-            if attio.mark_sent_to_clay(record_id, clay_row_id):
-                print(f"    ✅ Sent to Clay (row: {clay_row_id})")
-                sent_count += 1
-            else:
-                print(f"    ❌ Failed to update Attio status")
-                error_count += 1
+            log(f"    Sent to Clay (row: {clay_row_id})")
+            sent_ids.append(record_id)
         else:
-            print(f"    ❌ Failed to send to Clay")
+            log(f"    Failed to send to Clay")
             attio.mark_failed(record_id, "Failed to send to Clay")
-            error_count += 1
-
+        
         # Rate limiting
         time.sleep(RATE_LIMIT_SECONDS)
+    
+    log(f"Sent {len(sent_ids)} records to Clay")
+    return sent_ids
 
-    return sent_count, error_count
+
+def update_from_clay(attio: AttioClient, clay: ClayClient):
+    """
+    Check Clay for enriched data and update Attio records.
+    """
+    log("Querying Attio for records awaiting enrichment...")
+    pending = attio.query_sent_to_clay_records(limit=100)
+    
+    log(f"Found {len(pending)} records with 'sent_to_clay' status")
+    
+    if not pending:
+        return
+    
+    # Extract record IDs
+    pending_ids = []
+    for record in pending:
+        record_id = record.get("id", {}).get("record_id")
+        if record_id:
+            pending_ids.append(record_id)
+    
+    log(f"Checking Clay for enrichment results...")
+    enriched_data = clay.get_enriched_rows(pending_ids)
+    
+    log(f"Found {len(enriched_data)} enriched records in Clay")
+    
+    updated = 0
+    for record_id, data in enriched_data.items():
+        log(f"  Updating {record_id}...")
+        
+        if attio.mark_enriched(record_id, data):
+            updated += 1
+            log(f"    Updated with: job_title={data.get('job_title')}, company={data.get('company')}")
+        else:
+            log(f"    Failed to update Attio")
+        
+        time.sleep(RATE_LIMIT_SECONDS)
+    
+    log(f"Updated {updated} records in Attio")
 
 
 def main():
-    """Main entry point for the enrichment pipeline."""
-    print("=" * 60)
-    print(f"Attio-Clay Enrichment Pipeline")
-    print(f"Started at: {datetime.now().isoformat()}")
-    print("=" * 60)
-
-    # Verify configuration
-    check_config()
-
+    """Main entry point."""
+    log("=" * 60)
+    log("Attio-Clay Enrichment Pipeline Starting")
+    log("=" * 60)
+    
+    # Validate environment
+    required_vars = ["ATTIO_API_KEY", "CLAY_API_KEY", "CLAY_TABLE_ID"]
+    missing = [var for var in required_vars if not os.environ.get(var)]
+    
+    if missing:
+        log(f"ERROR: Missing required environment variables: {', '.join(missing)}")
+        sys.exit(1)
+    
     # Initialize clients
-    attio = AttioClient()
-    clay = ClayClient()
-
-    # Step 1: Process any completed enrichments from previous runs
-    enriched, failed = process_pending_enrichments(attio, clay)
-    print(f"\nPending results: {enriched} enriched, {failed} failed")
-
-    # Step 2: Send new records for enrichment
-    sent, errors = send_for_enrichment(attio, clay)
-    print(f"\nNew records: {sent} sent to Clay, {errors} errors")
-
+    try:
+        attio = AttioClient()
+        clay = ClayClient()
+    except Exception as e:
+        log(f"ERROR: Failed to initialize clients: {e}")
+        sys.exit(1)
+    
+    # Phase 1: Check for results from previous runs
+    log("")
+    log("Phase 1: Updating Attio with enriched data from Clay")
+    log("-" * 40)
+    try:
+        update_from_clay(attio, clay)
+    except Exception as e:
+        log(f"ERROR in Phase 1: {e}")
+    
+    # Phase 2: Send new records to Clay
+    log("")
+    log("Phase 2: Sending unenriched records to Clay")
+    log("-" * 40)
+    try:
+        sent_ids = send_to_clay(attio, clay)
+    except Exception as e:
+        log(f"ERROR in Phase 2: {e}")
+        sent_ids = []
+    
     # Summary
-    print("\n" + "=" * 60)
-    print("SUMMARY")
-    print("=" * 60)
-    print(f"Records enriched:      {enriched}")
-    print(f"Records sent to Clay:  {sent}")
-    print(f"Errors:                {failed + errors}")
-    print(f"Completed at:          {datetime.now().isoformat()}")
-    print("=" * 60)
-
-    # Exit with error code if there were failures
-    if failed + errors > 0:
-        print("\n⚠️ Completed with some errors")
-    else:
-        print("\n✅ Completed successfully")
+    log("")
+    log("=" * 60)
+    log("Pipeline Complete")
+    log("=" * 60)
 
 
 if __name__ == "__main__":

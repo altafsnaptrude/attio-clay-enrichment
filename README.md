@@ -1,88 +1,85 @@
 # Attio-Clay Enrichment Pipeline
 
-Automatically enriches leads in Attio that weren't auto-enriched, using Clay for data enrichment.
+Automated lead enrichment pipeline that runs hourly via GitHub Actions.
 
 ## How It Works
 
-```
-Every hour (via GitHub Actions):
-
-1. Check for completed enrichments from previous runs
-   └── Update Attio records with enriched data
-
-2. Find new unenriched leads in Attio
-   └── Has email, missing job_title/company/linkedin
-   └── Send to Clay for enrichment
-
-3. Next hour: Repeat
-```
+1. **Query Attio** for People records needing enrichment (have email, missing job_title/company/linkedin)
+2. **Send to Clay** for enrichment via Clay's API
+3. **Update Attio** with enriched data on the next run
 
 ## Setup
 
-### 1. Attio Custom Attributes
+### 1. Clay Table Setup
 
-The following attributes should exist on the People object:
-- `clay_enrichment_status` (text) - Status: pending, sent_to_clay, enriched, failed, skipped
-- `clay_sent_at` (timestamp) - When record was sent to Clay
-- `clay_enriched_at` (timestamp) - When enrichment completed
-- `clay_row_id` (text) - Clay's row ID for tracking
-- `enrichment_error` (text) - Error message if failed
+Create a Clay table with these columns:
 
-### 2. Clay Table
+**Input columns:**
+- `attio_record_id` (Text) - Links back to Attio
+- `email` (Email) - Primary lookup field
+- `first_name` (Text)
+- `last_name` (Text)
+- `company_name` (Text)
 
-Create a Clay table with:
-- **Input columns:** `attio_record_id`, `email`, `first_name`, `last_name`, `company_name`
-- **Enrichment columns:** Configure your preferred enrichment sources (LinkedIn, Clearbit, etc.)
-- **Output columns:** `enriched_job_title`, `enriched_company`, `enriched_linkedin`, `enriched_phone`
+**Enrichment columns (Clay fills these):**
+- `enriched_job_title` - From LinkedIn/enrichment
+- `enriched_company` - From enrichment
+- `enriched_linkedin` - LinkedIn URL
+- `enriched_phone` - Phone number (optional)
 
-### 3. GitHub Secrets
+### 2. GitHub Secrets
 
-Add these secrets to your repository (Settings → Secrets → Actions):
+Add these secrets in GitHub repo Settings → Secrets → Actions:
 
 | Secret | Description |
 |--------|-------------|
 | `ATTIO_API_KEY` | Your Attio API access token |
 | `CLAY_API_KEY` | Your Clay API key |
-| `CLAY_TABLE_ID` | The ID of your Clay enrichment table |
+| `CLAY_TABLE_ID` | The Clay table ID (from table URL) |
 
-### 4. Enable GitHub Actions
+### 3. Test
 
-The workflow runs automatically every hour. You can also trigger it manually from the Actions tab.
+1. Go to Actions tab
+2. Select "Attio-Clay Enrichment"
+3. Click "Run workflow"
+4. Check logs for successful execution
 
-## Local Development
+## Enrichment Logic
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
+A record needs enrichment if:
+- Has email address (required for lookup)
+- `clay_enrichment_status` is empty/null
+- Missing at least one of: `job_title`, `company`, `linkedin`
 
-# Set environment variables
-export ATTIO_API_KEY="your-attio-key"
-export CLAY_API_KEY="your-clay-key"
-export CLAY_TABLE_ID="your-table-id"
+## Attio Custom Attributes
 
-# Run the pipeline
-python src/main.py
+The pipeline uses these custom attributes on People:
+
+| Attribute | Purpose |
+|-----------|---------|
+| `clay_enrichment_status` | Tracks status: sent_to_clay, enriched, failed |
+| `clay_sent_at` | When record was sent to Clay |
+| `clay_enriched_at` | When enrichment completed |
+| `clay_row_id` | Reference to Clay row |
+| `enrichment_error` | Error message if failed |
+
+## Schedule
+
+Runs every hour at minute 0 (`:00`).
+
+To change frequency, edit `.github/workflows/enrichment.yml`:
+
+```yaml
+schedule:
+  - cron: '0 * * * *'  # Every hour
+  # - cron: '*/30 * * * *'  # Every 30 minutes
+  # - cron: '0 */6 * * *'  # Every 6 hours
 ```
 
-## Configuration
+## Manual Run
 
-Edit `src/config.py` to adjust:
-- `BATCH_SIZE` - Max records to process per run (default: 50)
-- `RATE_LIMIT_SECONDS` - Delay between API calls (default: 0.5)
-- `ENRICHMENT_TIMEOUT_HOURS` - Mark as failed after this many hours (default: 2)
+Trigger manually from GitHub Actions UI, or via CLI:
 
-## Troubleshooting
-
-### Records not being enriched
-1. Check if the record has an email address
-2. Check if `clay_enrichment_status` is already set
-3. Verify the Clay table is configured correctly
-
-### Enrichment failing
-1. Check GitHub Actions logs for errors
-2. Verify API keys are correct
-3. Check Clay table for the row and its enrichment status
-
-## License
-
-MIT
+```bash
+gh workflow run enrichment.yml
+```

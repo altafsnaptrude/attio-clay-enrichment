@@ -1,134 +1,137 @@
-"""Clay API client for sending records and retrieving enrichment results."""
+"""
+Clay API client for lead enrichment.
+"""
 
+import os
 import requests
-from typing import Any
-from config import CLAY_API_KEY, CLAY_TABLE_ID, CLAY_BASE_URL
+from typing import Optional
 
 
 class ClayClient:
-    def __init__(self):
-        self.base_url = CLAY_BASE_URL
-        self.table_id = CLAY_TABLE_ID
+    """Client for interacting with Clay API."""
+    
+    def __init__(self, api_key: Optional[str] = None, table_id: Optional[str] = None):
+        self.api_key = api_key or os.environ.get("CLAY_API_KEY")
+        self.table_id = table_id or os.environ.get("CLAY_TABLE_ID")
+        
+        if not self.api_key:
+            raise ValueError("CLAY_API_KEY is required")
+        
+        self.base_url = "https://api.clay.com/v1"
         self.headers = {
-            "Authorization": f"Bearer {CLAY_API_KEY}",
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-
-    def add_row(self, data: dict[str, Any]) -> dict | None:
+    
+    def add_row(self, data: dict) -> Optional[str]:
         """
         Add a row to the Clay table for enrichment.
-
+        
         Args:
-            data: Dict with keys like attio_record_id, email, first_name, etc.
-
+            data: Dictionary with fields to enrich (email, first_name, etc.)
+        
         Returns:
-            Response data including row_id, or None on error.
+            Row ID if successful, None otherwise
         """
-        url = f"{self.base_url}/{self.table_id}/add_row"
-
-        payload = {"data": data}
-
-        response = requests.post(url, headers=self.headers, json=payload)
-
-        if not response.ok:
-            print(f"Error adding row to Clay: {response.status_code}")
-            print(response.text)
+        if not self.table_id:
+            print("Error: CLAY_TABLE_ID not configured")
             return None
-
-        return response.json()
-
-    def get_rows(self, limit: int = 100, cursor: str = None) -> dict | None:
+        
+        url = f"{self.base_url}/tables/{self.table_id}/rows"
+        
+        # Ensure attio_record_id is included for tracking
+        payload = {
+            "data": data
+        }
+        
+        try:
+            response = requests.post(url, headers=self.headers, json=payload)
+            
+            if response.ok:
+                result = response.json()
+                return result.get("id") or result.get("row_id")
+            else:
+                print(f"Error adding row to Clay: {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            print(f"Exception adding row to Clay: {e}")
+            return None
+    
+    def get_rows(self, limit: int = 100) -> list:
         """
         Get rows from the Clay table.
-
+        
         Returns:
-            Dict with 'data' (list of rows) and 'cursor' for pagination.
+            List of row dictionaries
         """
-        url = f"{self.base_url}/{self.table_id}/rows"
-
-        params = {"limit": limit}
-        if cursor:
-            params["cursor"] = cursor
-
-        response = requests.get(url, headers=self.headers, params=params)
-
-        if not response.ok:
-            print(f"Error getting rows from Clay: {response.status_code}")
-            print(response.text)
-            return None
-
-        return response.json()
-
-    def get_row_by_id(self, row_id: str) -> dict | None:
-        """Get a specific row by its ID."""
-        url = f"{self.base_url}/{self.table_id}/rows/{row_id}"
-
-        response = requests.get(url, headers=self.headers)
-
-        if not response.ok:
-            print(f"Error getting row {row_id} from Clay: {response.status_code}")
-            print(response.text)
-            return None
-
-        return response.json()
-
-    def find_rows_by_attio_ids(self, attio_record_ids: list[str]) -> dict[str, dict]:
+        if not self.table_id:
+            print("Error: CLAY_TABLE_ID not configured")
+            return []
+        
+        url = f"{self.base_url}/tables/{self.table_id}/rows"
+        
+        params = {
+            "limit": limit
+        }
+        
+        try:
+            response = requests.get(url, headers=self.headers, params=params)
+            
+            if response.ok:
+                result = response.json()
+                return result.get("data", []) or result.get("rows", [])
+            else:
+                print(f"Error getting rows from Clay: {response.status_code} - {response.text}")
+                return []
+                
+        except Exception as e:
+            print(f"Exception getting rows from Clay: {e}")
+            return []
+    
+    def get_enriched_rows(self, attio_record_ids: list) -> dict:
         """
-        Find Clay rows that match the given Attio record IDs.
-
+        Get enriched data for specific Attio record IDs.
+        
+        Args:
+            attio_record_ids: List of Attio record IDs to look up
+        
         Returns:
-            Dict mapping attio_record_id to row data.
+            Dictionary mapping attio_record_id to enriched data
         """
-        result = {}
-        cursor = None
-
-        # Paginate through all rows to find matches
-        while True:
-            response = self.get_rows(limit=100, cursor=cursor)
-            if not response:
-                break
-
-            rows = response.get("data", [])
-            for row in rows:
-                attio_id = row.get("attio_record_id")
-                if attio_id and attio_id in attio_record_ids:
-                    result[attio_id] = row
-
-            # Check if we found all requested IDs
-            if len(result) >= len(attio_record_ids):
-                break
-
-            # Check for more pages
-            cursor = response.get("cursor")
-            if not cursor:
-                break
-
-        return result
-
-    def send_for_enrichment(self, record: dict) -> str | None:
+        rows = self.get_rows(limit=500)
+        
+        results = {}
+        for row in rows:
+            row_data = row.get("data", row)  # Handle different response formats
+            attio_id = row_data.get("attio_record_id")
+            
+            if attio_id and attio_id in attio_record_ids:
+                # Check if enrichment is complete (has enriched fields)
+                enriched_data = {
+                    "clay_row_id": row.get("id") or row.get("row_id"),
+                    "job_title": row_data.get("enriched_job_title") or row_data.get("job_title"),
+                    "company": row_data.get("enriched_company") or row_data.get("company"),
+                    "linkedin_url": row_data.get("enriched_linkedin") or row_data.get("linkedin_url") or row_data.get("linkedin"),
+                    "phone": row_data.get("enriched_phone") or row_data.get("phone"),
+                }
+                
+                # Only include if we got some enriched data
+                if any([enriched_data["job_title"], enriched_data["company"], enriched_data["linkedin_url"]]):
+                    results[attio_id] = enriched_data
+        
+        return results
+    
+    def send_for_enrichment(self, record_data: dict) -> Optional[str]:
         """
         Send a record to Clay for enrichment.
-
+        
+        This is an alias for add_row with the expected field structure.
+        
         Args:
-            record: Dict with attio_record_id, email, first_name, last_name, company
-
+            record_data: Dictionary with attio_record_id, email, first_name, last_name, company_name
+        
         Returns:
-            Clay row ID if successful, None otherwise.
+            Row ID if successful, None otherwise
         """
-        payload = {
-            "attio_record_id": record["record_id"],
-            "email": record.get("email"),
-            "first_name": record.get("first_name"),
-            "last_name": record.get("last_name"),
-            "company_name": record.get("company"),
-        }
-
-        # Remove None values
-        payload = {k: v for k, v in payload.items() if v is not None}
-
-        response = self.add_row(payload)
-
-        if response:
-            return response.get("id") or response.get("row_id")
-
-        return None
+        return self.add_row(record_data)
