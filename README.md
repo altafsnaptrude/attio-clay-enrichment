@@ -4,9 +4,17 @@ Automated lead enrichment pipeline that runs hourly via GitHub Actions.
 
 ## How It Works
 
+```
+┌─────────┐     ┌─────────┐     ┌─────────┐     ┌─────────────────┐
+│  Attio  │ ──► │  Clay   │ ──► │  Attio  │ ──► │ GitHub Actions  │
+│ (query) │     │(enrich) │     │ (update)│     │ (link company)  │
+└─────────┘     └─────────┘     └─────────┘     └─────────────────┘
+```
+
 1. **Query Attio** for People records needing enrichment (have email, missing job_title/company/linkedin)
-2. **Send to Clay** for enrichment via Clay's API
-3. **Update Attio** with enriched data on the next run
+2. **Send to Clay** for enrichment via webhook
+3. **Clay enriches** and updates Attio directly via HTTP API (job_title, linkedin, enriched_company_name)
+4. **GitHub Actions links** enriched contacts to their companies in Attio
 
 ## Setup
 
@@ -57,11 +65,22 @@ The pipeline uses these custom attributes on People:
 
 | Attribute | Purpose |
 |-----------|---------|
-| `clay_enrichment_status` | Tracks status: sent_to_clay, enriched, failed |
+| `clay_enrichment_status` | Tracks status: sent_to_clay, enriched, company_linked, failed |
 | `clay_sent_at` | When record was sent to Clay |
 | `clay_enriched_at` | When enrichment completed |
 | `clay_row_id` | Reference to Clay row |
+| `enriched_company_name` | Company name from Clay (text) - used for auto-linking |
 | `enrichment_error` | Error message if failed |
+
+## Company Linking
+
+When Clay enriches a contact, it stores the company name in `enriched_company_name` (a text field).
+The GitHub Actions pipeline then:
+
+1. Finds records with `enriched_company_name` but no `company` link
+2. Searches Attio for existing Company with that name
+3. Creates the Company if not found
+4. Links the Person to the Company
 
 ## Schedule
 

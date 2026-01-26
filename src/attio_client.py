@@ -213,3 +213,194 @@ class AttioClient:
             "first_name": first_name,
             "last_name": last_name,
         }
+
+    def query_enriched_without_company(self, limit: int = 50) -> list:
+        """
+        Query for People records that have been enriched but don't have a company linked.
+
+        Criteria:
+        - clay_enrichment_status is "enriched"
+        - enriched_company_name has a value
+        - company is empty/null
+        """
+        url = f"{self.base_url}/objects/people/records/query"
+
+        payload = {
+            "limit": limit,
+            "sorts": [
+                {"attribute": "clay_enriched_at", "direction": "desc"}
+            ]
+        }
+
+        response = requests.post(url, headers=self.headers, json=payload)
+
+        if not response.ok:
+            print(f"Error querying records: {response.status_code} - {response.text}")
+            return []
+
+        data = response.json()
+        records = data.get("data", [])
+
+        # Filter for records needing company linking
+        needs_linking = []
+        for record in records:
+            if self._needs_company_linking(record):
+                needs_linking.append(record)
+
+        return needs_linking
+
+    def _needs_company_linking(self, record: dict) -> bool:
+        """Check if a record needs company linking."""
+        values = record.get("values", {})
+
+        # Must have enriched status
+        status = self._extract_text_value(values, "clay_enrichment_status")
+        if status != "enriched":
+            return False
+
+        # Must have enriched_company_name
+        enriched_company = self._extract_text_value(values, "enriched_company_name")
+        if not enriched_company:
+            return False
+
+        # Must NOT already have a company linked
+        if self._has_company(values):
+            return False
+
+        return True
+
+    def search_company(self, company_name: str) -> Optional[str]:
+        """
+        Search for a company by name in Attio.
+
+        Returns:
+            Company record_id if found, None otherwise
+        """
+        url = f"{self.base_url}/objects/companies/records/query"
+
+        payload = {
+            "limit": 10,
+            "filter": {
+                "name": {
+                    "$contains": company_name
+                }
+            }
+        }
+
+        response = requests.post(url, headers=self.headers, json=payload)
+
+        if not response.ok:
+            print(f"Error searching companies: {response.status_code} - {response.text}")
+            return None
+
+        data = response.json()
+        records = data.get("data", [])
+
+        if not records:
+            return None
+
+        # Return the first matching company's record_id
+        # Try to find exact match first
+        for record in records:
+            values = record.get("values", {})
+            name = self._extract_company_name(values)
+            if name and name.lower() == company_name.lower():
+                return record.get("id", {}).get("record_id")
+
+        # If no exact match, return first result
+        return records[0].get("id", {}).get("record_id")
+
+    def _extract_company_name(self, values: dict) -> Optional[str]:
+        """Extract company name from values."""
+        name_data = values.get("name", [])
+        if not name_data:
+            return None
+
+        if isinstance(name_data, list) and len(name_data) > 0:
+            first = name_data[0]
+            if isinstance(first, dict):
+                return first.get("value")
+            return str(first)
+
+        return None
+
+    def create_company(self, company_name: str) -> Optional[str]:
+        """
+        Create a new company in Attio.
+
+        Returns:
+            Company record_id if created, None otherwise
+        """
+        url = f"{self.base_url}/objects/companies/records"
+
+        payload = {
+            "data": {
+                "values": {
+                    "name": company_name
+                }
+            }
+        }
+
+        response = requests.post(url, headers=self.headers, json=payload)
+
+        if not response.ok:
+            print(f"Error creating company: {response.status_code} - {response.text}")
+            return None
+
+        data = response.json()
+        return data.get("data", {}).get("id", {}).get("record_id")
+
+    def find_or_create_company(self, company_name: str) -> Optional[str]:
+        """
+        Find a company by name, or create it if it doesn't exist.
+
+        Returns:
+            Company record_id
+        """
+        # First, try to find existing company
+        company_id = self.search_company(company_name)
+
+        if company_id:
+            print(f"    Found existing company: {company_name}")
+            return company_id
+
+        # Create new company
+        print(f"    Creating new company: {company_name}")
+        company_id = self.create_company(company_name)
+
+        return company_id
+
+    def link_person_to_company(self, person_record_id: str, company_record_id: str) -> bool:
+        """
+        Link a person record to a company record.
+
+        Args:
+            person_record_id: The person's record ID
+            company_record_id: The company's record ID
+
+        Returns:
+            True if successful, False otherwise
+        """
+        url = f"{self.base_url}/objects/people/records/{person_record_id}"
+
+        payload = {
+            "data": {
+                "values": {
+                    "company": company_record_id
+                }
+            }
+        }
+
+        response = requests.patch(url, headers=self.headers, json=payload)
+
+        if not response.ok:
+            print(f"Error linking person to company: {response.status_code} - {response.text}")
+            return False
+
+        return True
+
+    def mark_company_linked(self, record_id: str) -> bool:
+        """Mark a record as having company linked."""
+        return self.update_record(record_id, {
+            "clay_enrichment_status": "company_linked",
+        })
